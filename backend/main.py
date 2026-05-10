@@ -30,9 +30,13 @@ key: str = os.environ.get("SUPABASE_SERVICE_KEY", "your-service-key")
 
 # Gemini configuration
 gemini_key = os.environ.get("GEMINI_API_KEY")
-if gemini_key:
-    genai.configure(api_key=gemini_key)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = None
+try:
+    if gemini_key:
+        genai.configure(api_key=gemini_key)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+except Exception as e:
+    print("Gemini init error:", e)
 
 # Pydantic Models
 class TripCreate(BaseModel):
