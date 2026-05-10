@@ -496,6 +496,16 @@ def get_next_stop(lat: float, lng: float, city: str):
         "next_next_stop": sorted_places[1] if len(sorted_places) > 1 else None
     }
 
+original_app = app
+async def asgi_wrapper(scope, receive, send):
+    if scope["type"] in ("http", "websocket"):
+        path = scope.get("path", "")
+        if path.startswith("/api"):
+            scope["path"] = path[4:] or "/"
+    await original_app(scope, receive, send)
+
+app = asgi_wrapper
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
