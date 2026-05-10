@@ -216,7 +216,7 @@ export default function TripDetails({ session }) {
             <span className="flex items-center gap-1"><Calendar className="w-4 h-4"/> {trip.start_date} to {trip.end_date}</span>
           </div>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3 mt-4 md:mt-0 w-full md:w-auto">
           <button 
             onClick={handleDownloadPDF}
             className="p-3 bg-white text-gray-700 font-bold rounded-xl shadow-sm border border-gray-200 hover:bg-gray-50 transition-colors"
@@ -260,7 +260,7 @@ export default function TripDetails({ session }) {
             <div className="space-y-6">
               {(Array.isArray(trip?.itinerary) ? trip.itinerary : []).map((day, idx) => (
                 <div key={idx} className="glass p-6 rounded-2xl shadow-sm border border-gray-100">
-                  <h3 className="text-xl font-bold text-gray-800 mb-4 flex justify-between items-center">
+                  <h3 className="text-xl font-bold text-gray-800 mb-4 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 sm:gap-0">
                     <span className="flex items-center gap-3">
                       Day {day?.day}
                       <span className="text-sm text-brand-600 bg-brand-50 px-2 py-0.5 rounded-full font-bold">Total: {currency}{(Array.isArray(day?.activities) ? day.activities : []).reduce((s, a) => s + (Number(a?.cost) || 0), 0)}</span>
@@ -270,8 +270,8 @@ export default function TripDetails({ session }) {
                   <div className="space-y-3">
                     {(Array.isArray(day?.activities) ? day.activities : []).map((act, i) => (
                       <div key={i} className="mb-3">
-                        <div className="flex justify-between items-center p-4 bg-white/60 rounded-xl hover:bg-white transition-colors border border-gray-50 shadow-sm">
-                          <div className="flex items-center gap-4">
+                        <div className="flex flex-col sm:flex-row justify-between sm:items-center p-4 bg-white/60 rounded-xl hover:bg-white transition-colors border border-gray-50 shadow-sm gap-2 sm:gap-0">
+                          <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
                             <span className="text-sm font-semibold text-brand-500 bg-brand-50 px-2 py-1 rounded-md">{act.time}</span>
                             <span className="font-medium text-gray-800">{act.name}</span>
                           </div>
@@ -283,7 +283,7 @@ export default function TripDetails({ session }) {
                              <Info className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
                              <div className="text-sm text-blue-900">
                                <p className="font-bold mb-1">AI Transport Insight: {String(act.name).split('to')[1] ? `Route to ${String(act.name).split('to')[1]}` : 'Optimal Route'}</p>
-                               <div className="flex items-center gap-4 text-xs font-medium opacity-80">
+                               <div className="flex flex-wrap items-center gap-4 text-xs font-medium opacity-80">
                                  <span className="flex items-center gap-1"><Train className="w-3 h-3"/> 2h 15m (Best)</span>
                                  <span className="flex items-center gap-1"><Plane className="w-3 h-3"/> 1h 0m (Higher CO₂)</span>
                                </div>
