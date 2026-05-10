@@ -1,4 +1,4 @@
-export const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+export const API_URL = import.meta.env.PROD ? '/api' : 'http://127.0.0.1:8000';
 
 export const apiCall = async (endpoint, options = {}) => {
   const { session } = await import('./supabase').then(m => m.supabase.auth.getSession()).then(r => r.data);
