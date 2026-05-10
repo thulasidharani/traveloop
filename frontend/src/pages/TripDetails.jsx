@@ -89,7 +89,8 @@ export default function TripDetails({ session }) {
     if (!trip || !trip.cities) return;
     setAiLoading(true);
     try {
-      const res = await fetch('http://127.0.0.1:8000/generate-itinerary', {
+      const { API_URL } = await import('../services/api');
+      const res = await fetch(`${API_URL}/generate-itinerary`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
