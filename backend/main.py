@@ -26,7 +26,7 @@ app.add_middleware(
 # Supabase configuration
 url: str = os.environ.get("SUPABASE_URL", "https://your-supabase-url.supabase.co")
 key: str = os.environ.get("SUPABASE_SERVICE_KEY", "your-service-key")
-# supabase: Client = create_client(url, key)
+supabase: Client = create_client(url, key)
 
 # Gemini configuration
 gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -66,22 +66,7 @@ class ItineraryItem(BaseModel):
     activity: str
     cost: float
 
-# In-memory DB for Hackathon Demo
-db_trips = [
-    {"id": 1, "title": "Summer in Paris", "start_date": "2024-06-15", "end_date": "2024-06-22", "cities": "Paris, France"},
-    {"id": 2, "title": "Japan Explorer", "start_date": "2024-09-10", "end_date": "2024-09-25", "cities": "Tokyo, Kyoto, Osaka"}
-]
 
-db_trip_details = {
-    1: {
-        "id": 1, "title": "Summer in Paris", "cities": "Paris, France", "start_date": "2024-06-15", "end_date": "2024-06-22",
-        "itinerary": [], "budget": [], "checklist": []
-    },
-    2: {
-        "id": 2, "title": "Japan Explorer", "cities": "Tokyo, Kyoto, Osaka", "start_date": "2024-09-10", "end_date": "2024-09-25",
-        "itinerary": [], "budget": [], "checklist": []
-    }
-}
 
 # Routes
 @app.get("/")
@@ -91,28 +76,16 @@ def read_root():
 @app.post("/create-trip")
 def create_trip(trip: TripCreate):
     """
-    Creates a new trip and stores it in memory.
+    Creates a new trip and stores it in Supabase.
     """
-    new_id = len(db_trips) + 1
-    new_trip = {
-        "id": new_id,
+    res = supabase.table('trips').insert({
+        "user_id": trip.user_id,
         "title": trip.title,
         "cities": trip.cities,
         "start_date": trip.start_date,
         "end_date": trip.end_date
-    }
-    db_trips.append(new_trip)
-    db_trip_details[new_id] = {
-        **new_trip,
-        "ai_prompt": trip.ai_prompt,
-        "total_budget": trip.budget,
-        "adults": trip.adults,
-        "children": trip.children,
-        "itinerary": [],
-        "budget": [],
-        "checklist": []
-    }
-    
+    }).execute()
+    new_id = res.data[0]['id']
     return {
         "id": new_id,
         "message": "Trip created successfully",
@@ -124,37 +97,83 @@ def get_trips():
     """
     Gets all trips.
     """
-    return db_trips
+    res = supabase.table('trips').select("*").execute()
+    return res.data
 
 @app.get("/trips/{trip_id}")
 def get_trip_details(trip_id: int):
     """
     Get full details of a specific trip.
     """
-    if trip_id in db_trip_details:
-        return db_trip_details[trip_id]
-        
-    return {
-        "id": trip_id, 
-        "title": "New Custom Trip", 
-        "cities": "Unknown", 
-        "start_date": "2024-01-01", 
-        "end_date": "2024-01-05",
-        "itinerary": [],
-        "budget": [],
-        "checklist": [],
-        "eco_impact": None
-    }
+    trip_res = supabase.table('trips').select("*").eq("id", trip_id).execute()
+    if not trip_res.data:
+        raise HTTPException(status_code=404, detail="Trip not found")
+    trip = trip_res.data[0]
+    
+    itinerary = supabase.table('itinerary').select("*").eq("trip_id", trip_id).order("day").execute().data
+    budget = supabase.table('expenses').select("*").eq("trip_id", trip_id).execute().data
+    checklist = supabase.table('checklist').select("*").eq("trip_id", trip_id).execute().data
+
+    itinerary_grouped = []
+    days = set([i['day'] for i in itinerary])
+    for d in sorted(days):
+        acts = [{"time": i["time"], "name": i["activity"], "cost": i["cost"]} for i in itinerary if i["day"] == d]
+        itinerary_grouped.append({"day": d, "activities": acts})
+
+    trip["itinerary"] = itinerary_grouped
+    trip["budget"] = [{"category": b["category"], "amount": b["amount"]} for b in budget]
+    trip["checklist"] = [{"item": c["item"], "done": c["status"]} for c in checklist]
+    trip["eco_impact"] = None
+    
+    return trip
 
 @app.put("/trips/{trip_id}")
 def update_trip(trip_id: int, data: dict = Body(...)):
     """
-    Updates the trip details in memory (saving AI generated data)
+    Updates the trip details in Supabase
     """
-    if trip_id in db_trip_details:
-        db_trip_details[trip_id].update(data)
-        return {"status": "success", "message": "Trip updated"}
-    raise HTTPException(status_code=404, detail="Trip not found")
+    supabase.table('itinerary').delete().eq('trip_id', trip_id).execute()
+    supabase.table('expenses').delete().eq('trip_id', trip_id).execute()
+    supabase.table('checklist').delete().eq('trip_id', trip_id).execute()
+    
+    if "itinerary" in data:
+        itin_inserts = []
+        for day in data["itinerary"]:
+            d_num = day.get("day", 1)
+            for act in day.get("activities", []):
+                itin_inserts.append({
+                    "trip_id": trip_id,
+                    "day": d_num,
+                    "time": act.get("time", ""),
+                    "activity": act.get("name", "Unknown"),
+                    "cost": act.get("cost", 0)
+                })
+        if itin_inserts:
+            supabase.table('itinerary').insert(itin_inserts).execute()
+            
+    if "budget" in data:
+        budget_inserts = []
+        for b in data["budget"]:
+            budget_inserts.append({
+                "trip_id": trip_id,
+                "category": b.get("category", "General"),
+                "amount": b.get("amount", 0)
+            })
+        if budget_inserts:
+            supabase.table('expenses').insert(budget_inserts).execute()
+            
+    if "checklist" in data:
+        check_inserts = []
+        for c in data["checklist"]:
+            check_inserts.append({
+                "trip_id": trip_id,
+                "item": c.get("item", "Item"),
+                "status": c.get("done", False)
+            })
+        if check_inserts:
+            supabase.table('checklist').insert(check_inserts).execute()
+            
+    return {"status": "success", "message": "Trip updated"}
 
 @app.post("/generate-itinerary")
 def generate_itinerary(prompt: str = Body(..., embed=True)):
