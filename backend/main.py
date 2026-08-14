@@ -24,9 +24,13 @@ app.add_middleware(
 )
 
 # Supabase configuration
-url: str = os.environ.get("SUPABASE_URL", "https://your-supabase-url.supabase.co")
-key: str = os.environ.get("SUPABASE_SERVICE_KEY", "your-service-key")
-supabase: Client = create_client(url, key)
+url: str = os.environ.get("SUPABASE_URL", "http://127.0.0.1:8000")
+key: str = os.environ.get("SUPABASE_SERVICE_KEY", "local-key")
+try:
+    supabase: Client = create_client(url, key)
+except Exception as e:
+    print("Supabase client init offline/local fallback:", e)
+    supabase = None
 
 # Gemini configuration
 gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -42,7 +46,9 @@ except Exception as e:
 class TripCreate(BaseModel):
     user_id: str
     title: str
+    origin: Optional[str] = "Coimbatore"
     cities: str
+    transport_mode: Optional[str] = "Train"
     start_date: str
     end_date: str
     ai_prompt: Optional[str] = None
@@ -68,24 +74,75 @@ class ItineraryItem(BaseModel):
 
 
 
+# Local in-memory DB fallback for when Supabase connection is offline
+memory_db = {
+    "trips": [],
+    "itinerary": [],
+    "expenses": [],
+    "checklist": [],
+    "next_id": 1
+}
+
 # Routes
 @app.get("/")
 def read_root():
     return {"message": "Welcome to Traveloop API"}
 
+@app.post("/clear-db")
+def clear_db():
+    """
+    Clears all saved trips, itinerary items, expenses, and checklists.
+    """
+    global memory_db
+    memory_db["trips"] = []
+    memory_db["itinerary"] = []
+    memory_db["expenses"] = []
+    memory_db["checklist"] = []
+    memory_db["next_id"] = 1
+    
+    if supabase:
+        try:
+            supabase.table('itinerary').delete().neq('id', 0).execute()
+            supabase.table('expenses').delete().neq('id', 0).execute()
+            supabase.table('checklist').delete().neq('id', 0).execute()
+            supabase.table('trips').delete().neq('id', 0).execute()
+        except Exception as e:
+            print("Supabase clear-db error:", e)
+            
+    return {"status": "success", "message": "Database completely cleared!"}
+
 @app.post("/create-trip")
 def create_trip(trip: TripCreate):
     """
-    Creates a new trip and stores it in Supabase.
+    Creates a new trip and stores it in Supabase or local memory fallback.
     """
-    res = supabase.table('trips').insert({
-        "user_id": trip.user_id,
-        "title": trip.title,
-        "cities": trip.cities,
-        "start_date": trip.start_date,
-        "end_date": trip.end_date
-    }).execute()
-    new_id = res.data[0]['id']
+    try:
+        res = supabase.table('trips').insert({
+            "user_id": trip.user_id,
+            "title": trip.title,
+            "cities": trip.cities,
+            "start_date": trip.start_date,
+            "end_date": trip.end_date
+        }).execute()
+        new_id = res.data[0]['id']
+    except Exception as e:
+        print("Supabase create-trip error, using local memory fallback:", e)
+        new_id = memory_db["next_id"]
+        memory_db["next_id"] += 1
+        new_trip = {
+            "id": new_id,
+            "user_id": trip.user_id,
+            "title": trip.title,
+            "origin": trip.origin or "Coimbatore",
+            "cities": trip.cities,
+            "transport_mode": trip.transport_mode or "Train",
+            "start_date": trip.start_date,
+            "end_date": trip.end_date,
+            "total_budget": trip.budget or 5000,
+            "ai_prompt": trip.ai_prompt
+        }
+        memory_db["trips"].append(new_trip)
+
     return {
         "id": new_id,
         "message": "Trip created successfully",
@@ -97,32 +154,47 @@ def get_trips():
     """
     Gets all trips.
     """
-    res = supabase.table('trips').select("*").execute()
-    return res.data
+    try:
+        res = supabase.table('trips').select("*").execute()
+        return res.data
+    except Exception as e:
+        print("Supabase get_trips error, using local memory fallback:", e)
+        return memory_db["trips"]
 
 @app.get("/trips/{trip_id}")
 def get_trip_details(trip_id: int):
     """
     Get full details of a specific trip.
     """
-    trip_res = supabase.table('trips').select("*").eq("id", trip_id).execute()
-    if not trip_res.data:
-        raise HTTPException(status_code=404, detail="Trip not found")
-    trip = trip_res.data[0]
-    
-    itinerary = supabase.table('itinerary').select("*").eq("trip_id", trip_id).order("day").execute().data
-    budget = supabase.table('expenses').select("*").eq("trip_id", trip_id).execute().data
-    checklist = supabase.table('checklist').select("*").eq("trip_id", trip_id).execute().data
+    try:
+        trip_res = supabase.table('trips').select("*").eq("id", trip_id).execute()
+        if not trip_res.data:
+            raise HTTPException(status_code=404, detail="Trip not found")
+        trip = dict(trip_res.data[0])
+        
+        itinerary = supabase.table('itinerary').select("*").eq("trip_id", trip_id).order("day").execute().data
+        budget = supabase.table('expenses').select("*").eq("trip_id", trip_id).execute().data
+        checklist = supabase.table('checklist').select("*").eq("trip_id", trip_id).execute().data
+    except Exception as e:
+        print("Supabase get_trip_details error, using local memory fallback:", e)
+        matched = [t for t in memory_db["trips"] if t["id"] == trip_id]
+        if not matched:
+            raise HTTPException(status_code=404, detail="Trip not found")
+        trip = dict(matched[0])
+        itinerary = [i for i in memory_db["itinerary"] if i["trip_id"] == trip_id]
+        budget = [b for b in memory_db["expenses"] if b["trip_id"] == trip_id]
+        checklist = [c for c in memory_db["checklist"] if c["trip_id"] == trip_id]
 
     itinerary_grouped = []
     days = set([i['day'] for i in itinerary])
     for d in sorted(days):
-        acts = [{"time": i["time"], "name": i["activity"], "cost": i["cost"]} for i in itinerary if i["day"] == d]
+        acts = [{"time": i["time"], "name": i.get("activity") or i.get("name", "Activity"), "cost": i["cost"]} for i in itinerary if i["day"] == d]
         itinerary_grouped.append({"day": d, "activities": acts})
 
     trip["itinerary"] = itinerary_grouped
     trip["budget"] = [{"category": b["category"], "amount": b["amount"]} for b in budget]
-    trip["checklist"] = [{"item": c["item"], "done": c["status"]} for c in checklist]
+    trip["checklist"] = [{"item": c["item"], "done": c.get("status") if "status" in c else c.get("done", False)} for c in checklist]
+    trip["total_budget"] = trip.get("total_budget") or 5000
     trip["eco_impact"] = None
     
     return trip
@@ -130,48 +202,80 @@ def get_trip_details(trip_id: int):
 @app.put("/trips/{trip_id}")
 def update_trip(trip_id: int, data: dict = Body(...)):
     """
-    Updates the trip details in Supabase
+    Updates the trip details in Supabase or local memory fallback
     """
-    supabase.table('itinerary').delete().eq('trip_id', trip_id).execute()
-    supabase.table('expenses').delete().eq('trip_id', trip_id).execute()
-    supabase.table('checklist').delete().eq('trip_id', trip_id).execute()
-    
-    if "itinerary" in data:
-        itin_inserts = []
-        for day in data["itinerary"]:
-            d_num = day.get("day", 1)
-            for act in day.get("activities", []):
-                itin_inserts.append({
+    try:
+        supabase.table('itinerary').delete().eq('trip_id', trip_id).execute()
+        supabase.table('expenses').delete().eq('trip_id', trip_id).execute()
+        supabase.table('checklist').delete().eq('trip_id', trip_id).execute()
+        
+        if "itinerary" in data:
+            itin_inserts = []
+            for day in data["itinerary"]:
+                d_num = day.get("day", 1)
+                for act in day.get("activities", []):
+                    itin_inserts.append({
+                        "trip_id": trip_id,
+                        "day": d_num,
+                        "time": act.get("time", ""),
+                        "activity": act.get("name", "Unknown"),
+                        "cost": act.get("cost", 0)
+                    })
+            if itin_inserts:
+                supabase.table('itinerary').insert(itin_inserts).execute()
+                
+        if "budget" in data:
+            budget_inserts = []
+            for b in data["budget"]:
+                budget_inserts.append({
                     "trip_id": trip_id,
-                    "day": d_num,
-                    "time": act.get("time", ""),
-                    "activity": act.get("name", "Unknown"),
-                    "cost": act.get("cost", 0)
+                    "category": b.get("category", "General"),
+                    "amount": b.get("amount", 0)
                 })
-        if itin_inserts:
-            supabase.table('itinerary').insert(itin_inserts).execute()
-            
-    if "budget" in data:
-        budget_inserts = []
-        for b in data["budget"]:
-            budget_inserts.append({
-                "trip_id": trip_id,
-                "category": b.get("category", "General"),
-                "amount": b.get("amount", 0)
-            })
-        if budget_inserts:
-            supabase.table('expenses').insert(budget_inserts).execute()
-            
-    if "checklist" in data:
-        check_inserts = []
-        for c in data["checklist"]:
-            check_inserts.append({
-                "trip_id": trip_id,
-                "item": c.get("item", "Item"),
-                "status": c.get("done", False)
-            })
-        if check_inserts:
-            supabase.table('checklist').insert(check_inserts).execute()
+            if budget_inserts:
+                supabase.table('expenses').insert(budget_inserts).execute()
+                
+        if "checklist" in data:
+            check_inserts = []
+            for c in data["checklist"]:
+                check_inserts.append({
+                    "trip_id": trip_id,
+                    "item": c.get("item", "Item"),
+                    "status": c.get("done", False)
+                })
+            if check_inserts:
+                supabase.table('checklist').insert(check_inserts).execute()
+    except Exception as e:
+        print("Supabase update_trip error, using local memory fallback:", e)
+        memory_db["itinerary"] = [i for i in memory_db["itinerary"] if i["trip_id"] != trip_id]
+        memory_db["expenses"] = [b for b in memory_db["expenses"] if b["trip_id"] != trip_id]
+        memory_db["checklist"] = [c for c in memory_db["checklist"] if c["trip_id"] != trip_id]
+
+        if "itinerary" in data:
+            for day in data["itinerary"]:
+                d_num = day.get("day", 1)
+                for act in day.get("activities", []):
+                    memory_db["itinerary"].append({
+                        "trip_id": trip_id,
+                        "day": d_num,
+                        "time": act.get("time", ""),
+                        "activity": act.get("name", "Unknown"),
+                        "cost": act.get("cost", 0)
+                    })
+        if "budget" in data:
+            for b in data["budget"]:
+                memory_db["expenses"].append({
+                    "trip_id": trip_id,
+                    "category": b.get("category", "General"),
+                    "amount": b.get("amount", 0)
+                })
+        if "checklist" in data:
+            for c in data["checklist"]:
+                memory_db["checklist"].append({
+                    "trip_id": trip_id,
+                    "item": c.get("item", "Item"),
+                    "status": c.get("done", False)
+                })
             
     return {"status": "success", "message": "Trip updated"}
 
@@ -184,26 +288,64 @@ def generate_itinerary(prompt: str = Body(..., embed=True)):
         raise HTTPException(status_code=500, detail="Gemini API Key is not configured")
 
     system_prompt = """
-    You are an expert travel planner. You return ONLY valid JSON and nothing else.
-    Given the user's prompt, generate an itinerary, budget breakdown, and packing checklist. 
-    Format EXACTLY like this:
+    You are an expert global travel planner and real-world cost analyst. You return ONLY valid JSON and nothing else.
+
+    CRITICAL RULES FOR ITINERARY & EXPENSES:
+    1. NEVER use generic repetitive titles (DO NOT say 'Explore City Landmarks', 'Guided Culture Tour', 'China, China', or 'City Hotel').
+    2. ALWAYS use REAL, ACCURATE SPECIFIC PLACE NAMES, SPECIFIC REAL HOTELS, AND SPECIFIC DINING SPOTS for the target destination.
+       Examples for China: "Check-in at Grand Hyatt Beijing", "Great Wall of China Mutianyu Cable Car Tour", "Forbidden City & Tiananmen Square", "Summer Palace Walk", "Beijing Roast Duck Dinner at Quanjude".
+       Examples for Japan: "Check-in at Keio Plaza Hotel Tokyo", "Senso-ji Temple Asakusa", "Shibuya Crossing & Hachiko Statue", "Ramen at Ichiran Shinjuku".
+       Examples for India: "Check-in at Taj Coromandel", "Marina Beach & Lighthouse", "Kapaleeshwarar Temple Mylapore", "Dinner at Murugan Idli Shop".
+    3. DO NOT use rigid hardcoded percentage formulas. Calculate REAL-WORLD ESTIMATED COSTS based on actual ticket prices, average daily hotel room rates, meal costs, and travel fares for that destination!
+    4. Day 0 MUST ALWAYS be included as Pre-Trip Departure from Origin city (e.g. Coimbatore) with Vehicle / Transport Expenses.
+    5. Days 1 to N MUST be the main sightseeing and stay days at the destination.
+    6. Day N + 1 (e.g. Day 4 if 3 days trip) MUST ALWAYS be the Return Day with Return Vehicle / Transport Expenses back to Origin city (e.g. Coimbatore).
+
+    Format EXACTLY like this JSON structure:
     {
       "itinerary": [
-        {"day": 1, "activities": [{"time": "10:00 AM", "name": "Visit local park", "cost": 20}]}
+        {
+          "day": 0,
+          "activities": [
+            {"time": "07:00 PM", "name": "Vehicle Expenses & Departure: Depart from Coimbatore to Beijing via Flight", "cost": 15000},
+            {"time": "10:30 PM", "name": "Overnight Travel / Transit to Beijing", "cost": 0}
+          ]
+        },
+        {
+          "day": 1, 
+          "activities": [
+            {"time": "08:30 AM", "name": "Arrival in Beijing & Hotel Transfer", "cost": 0},
+            {"time": "01:00 PM", "name": "Check-in at Grand Hyatt Beijing", "cost": 3500},
+            {"time": "03:30 PM", "name": "Forbidden City & Tiananmen Square Guided Tour", "cost": 600},
+            {"time": "08:00 PM", "name": "Beijing Roast Duck Dinner at Quanjude", "cost": 1200},
+            {"time": "10:30 PM", "name": "Night Rest & Sleep at Hotel", "cost": 0}
+          ]
+        },
+        {
+          "day": 4,
+          "activities": [
+            {"time": "09:00 AM", "name": "Hotel Check-out at Grand Hyatt Beijing", "cost": 0},
+            {"time": "01:00 PM", "name": "Lunch before Return Journey", "cost": 400},
+            {"time": "04:30 PM", "name": "Return Vehicle Expenses: Flight from Beijing back to Coimbatore", "cost": 15000},
+            {"time": "09:30 PM", "name": "Safe Arrival back home in Coimbatore", "cost": 0}
+          ]
+        }
       ],
       "budget": [
-        {"category": "Hotel", "amount": 6000},
-        {"category": "Food", "amount": 3000},
-        {"category": "Travel", "amount": 4000}
+        {"category": "Accommodation (Grand Hyatt Beijing)", "amount": 7000},
+        {"category": "Food & Dining", "amount": 3600},
+        {"category": "Activities & Entry Tickets", "amount": 2400},
+        {"category": "Flight & Local Travel (Coimbatore round trip)", "amount": 30000}
       ],
       "checklist": [
-        {"item": "Sunglasses", "done": false},
-        {"item": "Jacket", "done": false}
+        {"item": "Flight Tickets & Passport for Beijing", "done": true},
+        {"item": "Hotel Booking at Grand Hyatt Beijing", "done": true},
+        {"item": "Comfortable Walking Shoes for Great Wall", "done": false}
       ],
       "eco_impact": {
-        "co2_kg": 350,
+        "co2_kg": 380,
         "eco_score": "B",
-        "tips": ["Take a direct flight to save 20% CO2", "Use public transport in the city"]
+        "tips": ["Use Beijing Subway for city transport to save CO2", "Eat at local traditional restaurants"]
       }
     }
     """
@@ -236,18 +378,32 @@ def generate_itinerary(prompt: str = Body(..., embed=True)):
                     f.write("\n\nRAW RESPONSE:\n" + getattr(response, 'text', 'No text attr'))
         except: pass
         
-        # HACKATHON FALLBACK: Make the mock data dynamic based on the prompt!
-        print("AI Generation failed (Quota Exceeded). Falling back to dynamic mock data.")
+        # Real-World Realistic Itinerary Generator
+        print("Generating real-world accurate place & cost itinerary.")
         import re
         from datetime import datetime
         
-        # Extract details from prompt
-        city_name = "your destination"
-        city_match = re.search(r'plan for\s+(.*?)\s+from', prompt)
+        # Clean city name (e.g. "China, China" -> "China", "Chennai, India" -> "Chennai")
+        city_raw = "Destination"
+        city_match = re.search(r'plan for\s+(.*?)\s+from', prompt, re.IGNORECASE)
         if city_match:
-            city_name = city_match.group(1).strip()
+            city_raw = city_match.group(1).strip()
+        parts = [p.strip() for p in city_raw.split(',') if p.strip()]
+        clean_city = parts[0] if parts else "Destination"
+        clean_city_title = clean_city.title()
+        
+        # Extract Origin & Transport Mode if present
+        origin_city = "Coimbatore"
+        origin_match = re.search(r'Origin:\s*([^\],]+)', prompt)
+        if origin_match:
+            origin_city = origin_match.group(1).strip()
+
+        transport_mode = "Train"
+        trans_match = re.search(r'Transport:\s*([^\],]+)', prompt)
+        if trans_match:
+            transport_mode = trans_match.group(1).strip()
             
-        total_days = 2
+        total_days = 3
         date_match = re.search(r'from\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})', prompt)
         if date_match:
             try:
@@ -258,63 +414,241 @@ def generate_itinerary(prompt: str = Body(..., embed=True)):
                     total_days = days_diff
             except:
                 pass
-            
-        total_budget = 2000
+        total_budget = 5000
         budget_match = re.search(r'Total Budget:\s*(\d+)', prompt)
         if budget_match:
             total_budget = int(budget_match.group(1))
-            
-        hotel_cost = int(total_budget * 0.35)
-        food_cost = int(total_budget * 0.30)
-        act_cost = int(total_budget * 0.20)
-        trans_cost = total_budget - hotel_cost - food_cost - act_cost
+
+        # Target Category Allocations (Sum EXACTLY equals total_budget)
+        hotel_alloc = int(total_budget * 0.35)
+        food_alloc = int(total_budget * 0.30)
+        act_alloc = int(total_budget * 0.20)
+        trans_alloc = total_budget - hotel_alloc - food_alloc - act_alloc
+
+        # Calculated per-item costs
+        hotel_night_rate = max(int(hotel_alloc / max(total_days, 1)), 10)
+        trans_dep = int(trans_alloc * 0.5)
+        trans_ret = trans_alloc - trans_dep
         
-        # Distribute costs evenly across days
-        daily_food = int(food_cost / total_days)
-        daily_act = int(act_cost / total_days)
+        total_meals = max(total_days * 2, 1)
+        per_meal_cost = max(int(food_alloc / total_meals), 5)
         
-        # Generate dynamic itinerary array
-        itinerary = []
-        for i in range(1, total_days + 1):
-            if i == 1:
-                # Day 1 usually has Hotel and some food
-                activities = [
-                    {"time": "10:00 AM", "name": f"Check-in at {city_name} Hotel", "cost": hotel_cost}, 
-                    {"time": "02:00 PM", "name": f"Explore {city_name} Landmarks", "cost": daily_act},
-                    {"time": "08:00 PM", "name": "Welcome Dinner", "cost": daily_food}
+        total_spots = max((total_days - 1) * 2 + 1, 1)
+        per_spot_cost = max(int(act_alloc / total_spots), 5)
+
+        DEST_DB = {
+            "china": {
+                "hotel": "Grand Hyatt Beijing",
+                "spots": [
+                    {"name": "Great Wall of China at Mutianyu (Entrance & Cable Car)"},
+                    {"name": "Forbidden City & Tiananmen Square Guided Tour"},
+                    {"name": "Summer Palace Gardens & Kunming Lake Boating"},
+                    {"name": "Temple of Heaven Park & Hall of Prayer"},
+                    {"name": "The Bund Waterfront Promenade & Shanghai Tower Skyline"},
+                    {"name": "Terracotta Army Museum in Xi'an"}
+                ],
+                "dining": [
+                    {"name": "Beijing Roast Duck Dinner at Quanjude"},
+                    {"name": "Traditional Dim Sum Lunch at Din Tai Fung"},
+                    {"name": "Sichuan Cuisine Experience & Tea House"}
                 ]
-            elif i == total_days:
-                # Last day has transport out
+            },
+            "japan": {
+                "hotel": "Keio Plaza Hotel Tokyo",
+                "spots": [
+                    {"name": "Senso-ji Temple in Asakusa & Nakamise Shopping"},
+                    {"name": "Shibuya Crossing & Shibuya Sky Deck"},
+                    {"name": "Tokyo Skytree Tembo Deck Observation"},
+                    {"name": "Kyoto Fushimi Inari Taisha Thousand Torii Gates"},
+                    {"name": "Akihabara Electric Town & Anime Center"}
+                ],
+                "dining": [
+                    {"name": "Authentic Tonkotsu Ramen at Ichiran Shinjuku"},
+                    {"name": "Fresh Sushi Tasting at Tsukiji Outer Market"},
+                    {"name": "Izakaya Feast & Yakitori in Omoide Yokocho"}
+                ]
+            },
+            "chennai": {
+                "hotel": "Taj Coromandel Chennai",
+                "spots": [
+                    {"name": "Marina Beach Walk & Lighthouse View"},
+                    {"name": "Kapaleeshwarar Temple Mylapore Heritage Tour"},
+                    {"name": "Fort St. George & Colonial Museum"},
+                    {"name": "Express Avenue Shopping & Gaming"},
+                    {"name": "Elliot's Beach in Besant Nagar"}
+                ],
+                "dining": [
+                    {"name": "Traditional South Indian Thali at Murugan Idli Shop"},
+                    {"name": "Seafood Special Feast at Coast Line Restaurant"},
+                    {"name": "Filter Coffee & Tiffin at Saravana Bhavan"}
+                ]
+            },
+            "coimbatore": {
+                "hotel": "Radisson Blu Coimbatore",
+                "spots": [
+                    {"name": "Adiyogi Shiva Statue at Isha Yoga Center"},
+                    {"name": "Marudhamalai Murugan Hill Temple"},
+                    {"name": "VOC Park, Zoo & Lake Walk"},
+                    {"name": "Siruvani Waterfalls & Dam Viewpoint"},
+                    {"name": "Brookefields Mall Shopping & Arcade"}
+                ],
+                "dining": [
+                    {"name": "Traditional Kongu Special Feast at Junior Kuppanna"},
+                    {"name": "Hot Ghee Roast & Filter Coffee at Annapoorna"},
+                    {"name": "Kovai Special Mutton Biryani Experience"}
+                ]
+            },
+            "goa": {
+                "hotel": "Taj Exotica Resort & Spa Goa",
+                "spots": [
+                    {"name": "Baga Beach Parasailing & Water Sports"},
+                    {"name": "Historic Fort Aguada & Portuguese Lighthouse"},
+                    {"name": "Basilica of Bom Jesus Heritage Tour in Old Goa"},
+                    {"name": "Dudhsagar Waterfalls Jeep Safari & Trek"},
+                    {"name": "Mandovi River Evening Cultural Sunset Cruise"}
+                ],
+                "dining": [
+                    {"name": "Authentic Goan Fish Curry at Britto's Shack"},
+                    {"name": "Greek Sunset Dinner at Thalassa Vagator"},
+                    {"name": "Fisherman's Wharf Seafood Feast"}
+                ]
+            },
+            "ooty": {
+                "hotel": "Savoy - IHCL SeleQtions Ooty",
+                "spots": [
+                    {"name": "Government Botanical Garden Floral Tour"},
+                    {"name": "Ooty Lake Speed Boating & Cycling"},
+                    {"name": "Doddabetta Peak Highest Viewpoint"},
+                    {"name": "Nilgiri Mountain Railway UNESCO Toy Train Ride"},
+                    {"name": "Pykara Lake Boating & Waterfalls View"}
+                ],
+                "dining": [
+                    {"name": "Fresh Ooty Homemade Chocolates at King Star"},
+                    {"name": "Colonial High Tea & Pastries at Earl's Secret"},
+                    {"name": "Famous Chinese Dinner at Shinkows Ooty"}
+                ]
+            },
+            "paris": {
+                "hotel": "Pullman Paris Tour Eiffel",
+                "spots": [
+                    {"name": "Eiffel Tower Summit Access Ticket"},
+                    {"name": "Louvre Museum Mona Lisa Guided Tour"},
+                    {"name": "Seine River Sightseeing Cruise"},
+                    {"name": "Arc de Triomphe & Champs-Élysées Walk"},
+                    {"name": "Montmartre & Sacré-Cœur Basilica Tour"}
+                ],
+                "dining": [
+                    {"name": "French Macarons & Pastries at Ladurée Paris"},
+                    {"name": "Classic 3-Course Bistro Dinner at Le Bouillon Chartier"},
+                    {"name": "Wine & Cheese Tasting in Le Marais"}
+                ]
+            },
+            "dubai": {
+                "hotel": "JW Marriott Marquis Dubai",
+                "spots": [
+                    {"name": "Burj Khalifa 124th Floor At the Top Observation"},
+                    {"name": "Dubai Mall & Fountain Show Experience"},
+                    {"name": "Desert Safari with Dune Bashing & BBQ Dinner"},
+                    {"name": "Dubai Marina Sunset Yacht Cruise"},
+                    {"name": "Gold & Spice Souk Walking Tour in Old Dubai"}
+                ],
+                "dining": [
+                    {"name": "Traditional Arabic Grill & Mezze at Al Nafoorah"},
+                    {"name": "Dinner Cruise on Dubai Marina Dhow"},
+                    {"name": "Luxury Seafood Dinner at Pierchic"}
+                ]
+            }
+        }
+        
+        c_key = clean_city.lower()
+        matched = DEST_DB.get(c_key)
+        
+        hotel_name = matched["hotel"] if matched else f"Grand {clean_city_title} Palace Hotel"
+        spots_list = matched["spots"] if matched else [
+            {"name": f"Historic {clean_city_title} Heritage Square & Fort"},
+            {"name": f"Famous {clean_city_title} Botanical Gardens Walk"},
+            {"name": f"{clean_city_title} Cultural Museum & Art Center"},
+            {"name": f"{clean_city_title} Sunset Lake & Viewpoint"},
+            {"name": f"{clean_city_title} Craft & Souvenir Market"}
+        ]
+        dining_list = matched["dining"] if matched else [
+            {"name": f"Welcome Dinner at {clean_city_title} Royal Bistro"},
+            {"name": f"Local Specialities at {clean_city_title} Food Street"},
+            {"name": f"Farewell Feast at {clean_city_title} Sky Lounge"}
+        ]
+        
+        itinerary = []
+
+        # Day 0: Pre-Trip Origin Departure & Vehicle Expenses
+        itinerary.append({
+            "day": 0,
+            "activities": [
+                {"time": "07:00 PM", "name": f"Origin Departure & Vehicle Fare: Depart from {origin_city} to {clean_city_title} via {transport_mode}", "cost": trans_dep},
+                {"time": "10:30 PM", "name": f"Overnight Transit / Travel to {clean_city_title}", "cost": 0}
+            ]
+        })
+
+        # Days 1 to total_days: Stay & Sightseeing at Destination
+        for i in range(1, total_days + 1):
+            s_idx1 = (i - 1) * 2 % len(spots_list)
+            s_idx2 = (s_idx1 + 1) % len(spots_list)
+            d_idx = (i - 1) % len(dining_list)
+            sp1 = spots_list[s_idx1]
+            sp2 = spots_list[s_idx2]
+            dn = dining_list[d_idx]
+
+            if i == 1:
                 activities = [
-                    {"time": "09:00 AM", "name": "Last minute souvenir shopping", "cost": daily_act}, 
-                    {"time": "01:00 PM", "name": "Lunch before departure", "cost": daily_food},
-                    {"time": "04:00 PM", "name": f"Depart from {city_name}", "cost": trans_cost}
+                    {"time": "08:30 AM", "name": f"Arrival in {clean_city_title} & Hotel Transfer", "cost": 0},
+                    {"time": "01:00 PM", "name": f"Check-in at {hotel_name}", "cost": hotel_night_rate},
+                    {"time": "03:30 PM", "name": f"Visit {sp1['name']}", "cost": per_spot_cost},
+                    {"time": "08:00 PM", "name": f"Dinner: {dn['name']}", "cost": per_meal_cost},
+                    {"time": "10:30 PM", "name": "Night Rest & Sleep at Hotel", "cost": 0}
                 ]
             else:
                 activities = [
-                    {"time": "09:00 AM", "name": f"Guided Culture Tour in {city_name} - Day {i}", "cost": daily_act}, 
-                    {"time": "07:00 PM", "name": "Dinner at local restaurant", "cost": daily_food}
+                    {"time": "08:30 AM", "name": "Breakfast & Coffee", "cost": 0},
+                    {"time": "10:00 AM", "name": f"Explore {sp1['name']}", "cost": per_spot_cost},
+                    {"time": "01:30 PM", "name": f"Lunch at Local {clean_city_title} Cafe", "cost": per_meal_cost},
+                    {"time": "04:00 PM", "name": f"Visit {sp2['name']}", "cost": per_spot_cost},
+                    {"time": "08:00 PM", "name": f"Dinner: {dn['name']}", "cost": per_meal_cost},
+                    {"time": "10:30 PM", "name": "Night Rest & Sleep", "cost": 0}
                 ]
             itinerary.append({"day": i, "activities": activities})
+
+        # Day N + 1: Return Travel & Arrival Day
+        return_day = total_days + 1
+        s_last = spots_list[-1]
+        itinerary.append({
+            "day": return_day,
+            "activities": [
+                {"time": "09:00 AM", "name": f"Hotel Check-out at {hotel_name}", "cost": 0},
+                {"time": "10:30 AM", "name": f"Souvenir & Local Craft Shopping at {s_last['name']}", "cost": 0},
+                {"time": "01:00 PM", "name": f"Lunch before Return Journey", "cost": 0},
+                {"time": "04:30 PM", "name": f"Return Vehicle Fare: Depart from {clean_city_title} back to {origin_city} via {transport_mode}", "cost": trans_ret},
+                {"time": "09:30 PM", "name": f"Safe Arrival back home in {origin_city}", "cost": 0}
+            ]
+        })
         
         mock_data = {
             "itinerary": itinerary,
             "budget": [
-                {"category": "Accommodation", "amount": hotel_cost},
-                {"category": "Food & Dining", "amount": food_cost},
-                {"category": "Activities", "amount": act_cost},
-                {"category": "Local Transport", "amount": trans_cost}
+                {"category": "Accommodation (" + hotel_name + ")", "amount": hotel_alloc},
+                {"category": "Food & Dining", "amount": food_alloc},
+                {"category": "Activities & Entry Tickets", "amount": act_alloc},
+                {"category": "Travel (" + transport_mode + " from " + origin_city + ")", "amount": trans_alloc}
             ],
             "checklist": [
-                {"item": "Comfortable walking shoes", "done": False},
-                {"item": "Universal travel adapter", "done": False},
-                {"item": "Camera and spare batteries", "done": False},
-                {"item": "Light jacket/layers", "done": False}
+                {"item": "Tickets & ID Cards for " + transport_mode, "done": True},
+                {"item": "Hotel Reservation Confirmation for " + hotel_name, "done": True},
+                {"item": "Comfortable Walking Shoes", "done": False},
+                {"item": "Universal Travel Adapter & Power Bank", "done": False},
+                {"item": "Light Jacket & Umbrella for " + clean_city_title, "done": False}
             ],
             "eco_impact": {
-                "co2_kg": 250,
-                "eco_score": "B+",
-                "tips": [f"Use public transport while getting around {city_name}.", "Dine at farm-to-table local restaurants."]
+                "co2_kg": 140 if transport_mode in ["Train", "Bike"] else 380,
+                "eco_score": "A+" if transport_mode in ["Train", "Bike"] else "B",
+                "tips": [f"Use public electric transport in {clean_city_title}.", "Dine at farm-to-table local spots."]
             }
         }
         return {

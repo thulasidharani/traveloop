@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { apiCall } from '../services/api';
-import { MapPin, Calendar, Type, Sparkles, Wand2, Wallet, Users, CloudSun } from 'lucide-react';
+import { MapPin, Calendar, Type, Sparkles, Wand2, Wallet, Users, CloudSun, Navigation, Train, Plane, Car, Bus, Bike, Compass, Heart, Palmtree, Gem, AlertTriangle, Lock } from 'lucide-react';
+import { getCurrencySymbol } from '../utils/currency';
+import { getFeasibleTransportModes, isOverseasRoute } from '../utils/transport';
 
 export default function CreateTrip({ session }) {
   const navigate = useNavigate();
@@ -12,7 +14,9 @@ export default function CreateTrip({ session }) {
 
   const [formData, setFormData] = useState({
     title: '',
+    origin: 'Coimbatore',
     cities: '',
+    transport_mode: 'Train',
     start_date: '',
     end_date: '',
     budget: 5000,
@@ -21,35 +25,24 @@ export default function CreateTrip({ session }) {
     ai_prompt: initialPrompt
   });
 
+  const feasibleModes = getFeasibleTransportModes(formData.origin, formData.cities);
+  const isOverseas = isOverseasRoute(formData.origin, formData.cities);
+
+  useEffect(() => {
+    if (isOverseas && formData.transport_mode !== 'Flight') {
+      setFormData(prev => ({ ...prev, transport_mode: 'Flight' }));
+    }
+  }, [formData.origin, formData.cities, isOverseas]);
+
   const [suggestions, setSuggestions] = useState([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [liveWeather, setLiveWeather] = useState(null);
 
   const [styles, setStyles] = useState([]);
-  const availableStyles = ['Adventure 🏔️', 'Luxury 🥂', 'Backpacking 🎒', 'Family 👨‍👩‍👧', 'Culture 🏛️', 'Romantic 💖'];
+  const availableStyles = ['Adventure', 'Luxury', 'Backpacking', 'Family', 'Culture', 'Romantic'];
 
   const toggleStyle = (style) => {
     setStyles(prev => prev.includes(style) ? prev.filter(s => s !== style) : [...prev, style]);
-  };
-
-  const getCurrencySymbol = (citiesStr) => {
-    if (!citiesStr) return '₹';
-    const c = String(citiesStr).toLowerCase();
-    if (c.includes('india') || c.includes('ind') || c.includes('goa') || c.includes('delhi') || c.includes('mumbai') || c.includes('chennai') || c.includes('kerala')) return '₹';
-    if (c.includes('uk') || c.includes('london') || c.includes('england') || c.includes('scotland')) return '£';
-    if (c.includes('europe') || c.includes('france') || c.includes('paris') || c.includes('italy') || c.includes('rome') || c.includes('germany') || c.includes('spain') || c.includes('barcelona') || c.includes('amsterdam') || c.includes('netherlands') || c.includes('greece') || c.includes('portugal')) return '€';
-    if (c.includes('swiss') || c.includes('zurich') || c.includes('switzerland')) return 'CHF ';
-    if (c.includes('japan') || c.includes('tokyo') || c.includes('kyoto') || c.includes('osaka')) return '¥';
-    if (c.includes('dubai') || c.includes('uae') || c.includes('abu dhabi')) return 'AED ';
-    if (c.includes('bali') || c.includes('indonesia') || c.includes('jakarta')) return 'Rp ';
-    if (c.includes('thai') || c.includes('bangkok') || c.includes('phuket')) return '฿';
-    if (c.includes('singapore')) return 'S$';
-    if (c.includes('malaysia') || c.includes('kuala lumpur')) return 'RM ';
-    if (c.includes('australia') || c.includes('sydney') || c.includes('melbourne')) return 'A$';
-    if (c.includes('canada') || c.includes('toronto') || c.includes('vancouver')) return 'C$';
-    if (c.includes('korea') || c.includes('seoul')) return '₩';
-    if (c.includes('vietnam') || c.includes('hanoi') || c.includes('ho chi minh')) return '₫';
-    return '$';
   };
 
   const calculateDays = () => {
@@ -337,8 +330,59 @@ export default function CreateTrip({ session }) {
               </div>
             </div>
 
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Navigation className="w-4 h-4 text-brand-500"/> Starting Location (Origin)</label>
+                <input 
+                  name="origin" 
+                  value={formData.origin} 
+                  onChange={handleChange} 
+                  required 
+                  placeholder="e.g. Coimbatore" 
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-brand-400 focus:ring-4 focus:ring-brand-100 bg-white shadow-sm transition-all text-gray-900 font-medium" 
+                />
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-semibold text-gray-700 flex items-center gap-2"><Train className="w-4 h-4 text-brand-500"/> Mode of Transport</label>
+                  {isOverseas && <span className="text-[10px] bg-amber-100 text-amber-800 font-bold px-2 py-0.5 rounded-full flex items-center gap-1"><Lock className="w-3 h-3"/> Overseas Route</span>}
+                </div>
+                <div className="grid grid-cols-5 gap-1.5 bg-gray-100 p-1.5 rounded-xl border border-gray-200">
+                  {[
+                    { mode: 'Train', icon: Train },
+                    { mode: 'Flight', icon: Plane },
+                    { mode: 'Car', icon: Car },
+                    { mode: 'Bus', icon: Bus },
+                    { mode: 'Bike', icon: Bike }
+                  ].map(({ mode, icon: Icon }) => {
+                    const isAllowed = feasibleModes[mode]?.feasible;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        disabled={!isAllowed}
+                        onClick={() => isAllowed && setFormData(prev => ({ ...prev, transport_mode: mode }))}
+                        title={!isAllowed ? feasibleModes[mode]?.reason : mode}
+                        className={`flex flex-col items-center justify-center py-2 rounded-lg text-xs font-bold transition-all relative ${
+                          formData.transport_mode === mode
+                            ? 'bg-brand-600 text-white shadow-md scale-105'
+                            : !isAllowed
+                            ? 'opacity-35 cursor-not-allowed bg-gray-200/50 text-gray-400 line-through'
+                            : 'text-gray-600 hover:bg-white/60'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 mb-0.5" />
+                        {mode}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
             <div className="space-y-2 relative">
-              <label className="text-sm font-semibold text-gray-700 flex items-center gap-2"><MapPin className="w-4 h-4 text-brand-500"/> Destinations</label>
+              <label className="text-sm font-semibold text-gray-700 flex items-center gap-2"><MapPin className="w-4 h-4 text-brand-500"/> Destination City / Country</label>
               <input 
                 name="cities" 
                 value={formData.cities} 
@@ -346,7 +390,7 @@ export default function CreateTrip({ session }) {
                 onFocus={() => setShowSuggestions(true)}
                 onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
                 required 
-                placeholder="e.g. Paris, Rome, Barcelona" 
+                placeholder="e.g. Chennai, Tokyo, Paris" 
                 className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:border-brand-400 focus:ring-4 focus:ring-brand-100 bg-white shadow-sm transition-all text-gray-900 font-medium" 
               />
               {showSuggestions && suggestions.length > 0 && (
